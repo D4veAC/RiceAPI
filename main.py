@@ -36,7 +36,7 @@ def load_model():
     api_key = os.environ.get("GEMINI_API_KEY")
     if api_key:
         genai.configure(api_key=api_key)
-        gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+        gemini_model = genai.GenerativeModel("gemini-2.0-flash")
         print("Gemini loaded.")
     else:
         print("WARNING: GEMINI_API_KEY not set. Running without Gemini validation.")
