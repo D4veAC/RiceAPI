@@ -28,8 +28,11 @@ def load_model():
     global model, class_names, gemini_client
 
     model = tf.keras.models.load_model("rice_model.keras", safe_mode=False)
+    
     with open("class_names.json") as f:
-        class_names = json.load(f)
+        loaded = json.load(f)
+    class_names.extend(loaded)  # ← pakai extend bukan assignment
+    
     print(f"Model loaded. Classes: {class_names}")
 
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -117,7 +120,6 @@ async def predict(file: UploadFile = File(...)):
     
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File harus berupa gambar")
-    ...
 
     image_bytes = await file.read()
 
