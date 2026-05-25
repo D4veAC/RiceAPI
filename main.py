@@ -22,7 +22,7 @@ class_names = []
 @app.on_event("startup")
 def load_model():
     global model, class_names
-    model = tf.keras.models.load_model("rice_model.keras")
+    model = tf.keras.models.load_model("rice_model.keras",safe_mode=False )
     with open("class_names.json") as f:
         class_names = json.load(f)
     print(f"Model loaded. Classes: {class_names}")
@@ -31,7 +31,7 @@ def load_model():
 def preprocess_image(image_bytes: bytes) -> np.ndarray:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img = img.resize((224, 224))
-    arr = np.array(img, dtype=np.float32) / 255.0
+    arr = np.array(img, dtype=np.float32)
     return np.expand_dims(arr, axis=0)  # (1, 224, 224, 3)
 
 
