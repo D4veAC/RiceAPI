@@ -112,8 +112,12 @@ def recheck_with_gemini(image_bytes: bytes, model_prediction: str, confidence: f
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
+    if model is None or not class_names:
+        raise HTTPException(status_code=503, detail="Model belum siap, coba lagi.")
+    
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File harus berupa gambar")
+    ...
 
     image_bytes = await file.read()
 
