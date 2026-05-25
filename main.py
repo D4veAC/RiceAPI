@@ -32,7 +32,22 @@ def load_model():
     with open("class_names.json") as f:
         loaded = json.load(f)
     class_names.extend(loaded)  # ← pakai extend bukan assignment
-    
+
+    output_units = model.output_shape[-1]
+    if len(class_names) < output_units:
+        missing = output_units - len(class_names)
+        print(
+            f"WARNING: class_names.json has {len(class_names)} labels but model output has {output_units} units. "
+            f"Adding {missing} placeholder label(s)."
+        )
+        class_names.extend([f"Unknown Label {i+1}" for i in range(missing)])
+    elif len(class_names) > output_units:
+        print(
+            f"WARNING: class_names.json has {len(class_names)} labels but model output has {output_units} units. "
+            f"Truncating extra label(s)."
+        )
+        del class_names[output_units:]
+
     print(f"Model loaded. Classes: {class_names}")
 
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -141,9 +156,10 @@ async def predict(file: UploadFile = File(...)):
     top_idx = int(np.argmax(preds))
     top_conf = float(preds[top_idx])
 
+    label_count = min(len(class_names), len(preds))
     results = [
         {"class": class_names[i], "confidence": round(float(preds[i]) * 100, 2)}
-        for i in range(len(class_names))
+        for i in range(label_count)
     ]
     results.sort(key=lambda x: x["confidence"], reverse=True)
 
