@@ -46,12 +46,14 @@ def load_model():
 def root():
     return {"status": "ok", "model": "Rice Disease Classifier", "classes": class_names}
 
+from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
+
 def preprocess_image(image_bytes: bytes) -> np.ndarray:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img = img.resize((224, 224))
     arr = np.array(img, dtype=np.float32)
+    arr = preprocess_input(arr)          # ← pindah ke sini
     return np.expand_dims(arr, axis=0)
-@app.post("/predict")
 
 async def predict(file: UploadFile = File(...)):
     if not file.content_type.startswith("image/"):
