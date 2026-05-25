@@ -7,9 +7,10 @@ from PIL import Image
 import io
 import tensorflow as tf
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
-app = FastAPI(title="Rice Disease Classifier", version="2.0.0")
+app = FastAPI(title="Rice Disease Classifier", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,24 +21,21 @@ app.add_middleware(
 
 model = None
 class_names = []
-gemini_model = None
+gemini_client = None
 
 @app.on_event("startup")
 def load_model():
-    global model, class_names, gemini_model
+    global model, class_names, gemini_client
 
-    # Load TF model
     model = tf.keras.models.load_model("rice_model.keras", safe_mode=False)
     with open("class_names.json") as f:
         class_names = json.load(f)
     print(f"Model loaded. Classes: {class_names}")
 
-    # Load Gemini
     api_key = os.environ.get("GEMINI_API_KEY")
     if api_key:
-        genai.configure(api_key=api_key)
-        gemini_model = genai.GenerativeModel("gemini-2.0-flash-lite")
-        print("Gemini loaded.")
+        gemini_client = genai.Client(api_key=api_key)
+        print("Gemini 2.5 Flash loaded.")
     else:
         print("WARNING: GEMINI_API_KEY not set. Running without Gemini validation.")
 
@@ -48,7 +46,7 @@ def root():
         "status": "ok",
         "model": "Rice Disease Classifier",
         "classes": class_names,
-        "gemini_enabled": gemini_model is not None
+        "gemini_enabled": gemini_client is not None
     }
 
 
@@ -61,51 +59,55 @@ def preprocess_image(image_bytes: bytes) -> np.ndarray:
 
 
 def validate_with_gemini(image_bytes: bytes) -> tuple[bool, str]:
-    """
-    Returns (is_rice_leaf, reason)
-    """
     try:
         pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        response = gemini_model.generate_content([
-            pil_img,
-            (
-                "Look at this image carefully. "
-                "Is this a close-up photo of a rice plant leaf? "
-                "Answer with ONLY 'yes' or 'no', nothing else."
-            )
-        ])
+        pil_img = pil_img.resize((224, 224))
+        buf = io.BytesIO()
+        pil_img.save(buf, format="JPEG", quality=85)
+        img_bytes = buf.getvalue()
+
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
+                types.Part.from_text(
+                    "Is this a close-up photo of a rice plant leaf? "
+                    "Answer with ONLY 'yes' or 'no', nothing else."
+                )
+            ]
+        )
         answer = response.text.strip().lower()
         return ("yes" in answer), answer
     except Exception as e:
         print(f"Gemini error: {e}")
-        return True, "gemini_error"  # fallback: lanjut ke model
+        return True, "gemini_error"
 
 
 def recheck_with_gemini(image_bytes: bytes, model_prediction: str, confidence: float) -> dict:
-    """
-    Recheck kalau confidence rendah (0.6-0.75).
-    Returns dict dengan gemini_says dan final_prediction.
-    """
     try:
         pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        pil_img = pil_img.resize((224, 224))
+        buf = io.BytesIO()
+        pil_img.save(buf, format="JPEG", quality=85)
+        img_bytes = buf.getvalue()
+
         class_list = ", ".join(class_names)
-        response = gemini_model.generate_content([
-            pil_img,
-            (
-                f"This is a rice leaf image. My model predicted '{model_prediction}' "
-                f"with {confidence:.1f}% confidence but I'm not sure. "
-                f"The possible diseases are: {class_list}. "
-                f"What disease does this rice leaf most likely have? "
-                f"Answer with ONLY the exact class name from the list, nothing else."
-            )
-        ])
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
+                types.Part.from_text(
+                    f"This is a rice leaf image. My model predicted '{model_prediction}' "
+                    f"with {confidence:.1f}% confidence but I'm not sure. "
+                    f"The possible diseases are: {class_list}. "
+                    f"What disease does this rice leaf most likely have? "
+                    f"Answer with ONLY the exact class name from the list, nothing else."
+                )
+            ]
+        )
         gemini_answer = response.text.strip()
-        # Cek apakah jawaban Gemini ada di class_names
         matched = next((c for c in class_names if c.lower() in gemini_answer.lower()), None)
-        return {
-            "gemini_says": gemini_answer,
-            "matched_class": matched
-        }
+        return {"gemini_says": gemini_answer, "matched_class": matched}
     except Exception as e:
         print(f"Gemini recheck error: {e}")
         return {"gemini_says": None, "matched_class": None}
@@ -118,8 +120,8 @@ async def predict(file: UploadFile = File(...)):
 
     image_bytes = await file.read()
 
-    # ── Step 1: Gemini gatekeeper ─────────────────────────────────────────
-    if gemini_model is not None:
+    # Step 1: Gemini gatekeeper
+    if gemini_client is not None:
         is_leaf, gemini_raw = validate_with_gemini(image_bytes)
         if not is_leaf:
             return {
@@ -130,7 +132,7 @@ async def predict(file: UploadFile = File(...)):
                 "validated_by": "gemini"
             }
 
-    # ── Step 2: Model predict ─────────────────────────────────────────────
+    # Step 2: Model predict
     img_array = preprocess_image(image_bytes)
     preds = model.predict(img_array)[0]
     top_idx = int(np.argmax(preds))
@@ -142,8 +144,7 @@ async def predict(file: UploadFile = File(...)):
     ]
     results.sort(key=lambda x: x["confidence"], reverse=True)
 
-    # ── Step 3: Confidence check ──────────────────────────────────────────
-    # Kalau sangat rendah → tolak
+    # Step 3: Terlalu rendah → tolak
     if top_conf < 0.5:
         return {
             "prediction": "Not a rice leaf",
@@ -153,11 +154,11 @@ async def predict(file: UploadFile = File(...)):
             "validated_by": "threshold"
         }
 
-    # ── Step 4: Gemini recheck kalau confidence 0.5-0.75 ─────────────────
+    # Step 4: Gemini recheck kalau confidence 0.5-0.75
     final_prediction = class_names[top_idx]
     validated_by = "model"
 
-    if gemini_model is not None and top_conf < 0.75:
+    if gemini_client is not None and top_conf < 0.75:
         recheck = recheck_with_gemini(image_bytes, final_prediction, top_conf * 100)
         if recheck["matched_class"]:
             final_prediction = recheck["matched_class"]
