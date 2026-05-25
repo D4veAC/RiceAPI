@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 import io
 import tensorflow as tf
+from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 
 app = FastAPI(title="Rice Disease Classifier", version="1.0.0")
 
@@ -15,29 +16,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load model & class names on startup
 model = None
 class_names = []
-
-from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 
 @app.on_event("startup")
 def load_model():
     global model, class_names
-    
-    custom_objects = {
-        'Lambda': lambda config: tf.keras.layers.Lambda(
-            preprocess_input,
-            output_shape=lambda x: x  # ← fix NotImplementedError
-        )
-    }
-    
-    model = tf.keras.models.load_model(
-        "rice_model.keras",
-        custom_objects=custom_objects,
-        safe_mode=False
-    )
-    
+    model = tf.keras.models.load_model("rice_model.keras", safe_mode=False)
     with open("class_names.json") as f:
         class_names = json.load(f)
     print(f"Model loaded. Classes: {class_names}")
@@ -46,15 +31,14 @@ def load_model():
 def root():
     return {"status": "ok", "model": "Rice Disease Classifier", "classes": class_names}
 
-from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
-
 def preprocess_image(image_bytes: bytes) -> np.ndarray:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img = img.resize((224, 224))
     arr = np.array(img, dtype=np.float32)
-    arr = preprocess_input(arr)          # ← pindah ke sini
+    arr = preprocess_input(arr)
     return np.expand_dims(arr, axis=0)
 
+@app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File harus berupa gambar")
@@ -72,7 +56,6 @@ async def predict(file: UploadFile = File(...)):
     ]
     results.sort(key=lambda x: x["confidence"], reverse=True)
 
-    # Tolak kalau confidence rendah
     if top_conf < 0.6:
         return {
             "prediction": "Not a rice leaf",
