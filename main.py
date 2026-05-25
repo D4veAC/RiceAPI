@@ -19,28 +19,40 @@ app.add_middleware(
 model = None
 class_names = []
 
+from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
+
 @app.on_event("startup")
 def load_model():
     global model, class_names
-    model = tf.keras.models.load_model("rice_model.keras",safe_mode=False )
+    
+    custom_objects = {
+        'Lambda': lambda config: tf.keras.layers.Lambda(
+            preprocess_input,
+            output_shape=lambda x: x  # ← fix NotImplementedError
+        )
+    }
+    
+    model = tf.keras.models.load_model(
+        "rice_model.keras",
+        custom_objects=custom_objects,
+        safe_mode=False
+    )
+    
     with open("class_names.json") as f:
         class_names = json.load(f)
     print(f"Model loaded. Classes: {class_names}")
-
-
-def preprocess_image(image_bytes: bytes) -> np.ndarray:
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    img = img.resize((224, 224))
-    arr = np.array(img, dtype=np.float32)
-    return np.expand_dims(arr, axis=0)  # (1, 224, 224, 3)
-
 
 @app.get("/")
 def root():
     return {"status": "ok", "model": "Rice Disease Classifier", "classes": class_names}
 
-
+def preprocess_image(image_bytes: bytes) -> np.ndarray:
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img = img.resize((224, 224))
+    arr = np.array(img, dtype=np.float32)
+    return np.expand_dims(arr, axis=0)
 @app.post("/predict")
+
 async def predict(file: UploadFile = File(...)):
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File harus berupa gambar")
@@ -48,8 +60,9 @@ async def predict(file: UploadFile = File(...)):
     image_bytes = await file.read()
     img_array = preprocess_image(image_bytes)
 
-    preds = model.predict(img_array)[0]  # shape: (6,)
+    preds = model.predict(img_array)[0]
     top_idx = int(np.argmax(preds))
+    top_conf = float(preds[top_idx])
 
     results = [
         {"class": class_names[i], "confidence": round(float(preds[i]) * 100, 2)}
@@ -57,8 +70,17 @@ async def predict(file: UploadFile = File(...)):
     ]
     results.sort(key=lambda x: x["confidence"], reverse=True)
 
+    # Tolak kalau confidence rendah
+    if top_conf < 0.6:
+        return {
+            "prediction": "Not a rice leaf",
+            "confidence": round(top_conf * 100, 2),
+            "all_scores": results,
+            "message": "Gambar tidak dikenali sebagai daun padi. Pastikan foto menampilkan daun padi secara jelas."
+        }
+
     return {
         "prediction": class_names[top_idx],
-        "confidence": round(float(preds[top_idx]) * 100, 2),
+        "confidence": round(top_conf * 100, 2),
         "all_scores": results,
     }
