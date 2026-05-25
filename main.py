@@ -58,22 +58,22 @@ def preprocess_image(image_bytes: bytes) -> np.ndarray:
     return np.expand_dims(arr, axis=0)
 
 
+def resize_for_gemini(image_bytes: bytes) -> bytes:
+    pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    pil_img = pil_img.resize((224, 224))
+    buf = io.BytesIO()
+    pil_img.save(buf, format="JPEG", quality=85)
+    return buf.getvalue()
+
+
 def validate_with_gemini(image_bytes: bytes) -> tuple[bool, str]:
     try:
-        pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        pil_img = pil_img.resize((224, 224))
-        buf = io.BytesIO()
-        pil_img.save(buf, format="JPEG", quality=85)
-        img_bytes = buf.getvalue()
-
+        img_bytes = resize_for_gemini(image_bytes)
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
                 types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
-                types.Part.from_text(
-                    "Is this a close-up photo of a rice plant leaf? "
-                    "Answer with ONLY 'yes' or 'no', nothing else."
-                )
+                types.Part.from_text(text="Is this a close-up photo of a rice plant leaf? Answer with ONLY 'yes' or 'no', nothing else.")
             ]
         )
         answer = response.text.strip().lower()
@@ -85,23 +85,20 @@ def validate_with_gemini(image_bytes: bytes) -> tuple[bool, str]:
 
 def recheck_with_gemini(image_bytes: bytes, model_prediction: str, confidence: float) -> dict:
     try:
-        pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        pil_img = pil_img.resize((224, 224))
-        buf = io.BytesIO()
-        pil_img.save(buf, format="JPEG", quality=85)
-        img_bytes = buf.getvalue()
-
+        img_bytes = resize_for_gemini(image_bytes)
         class_list = ", ".join(class_names)
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
                 types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
                 types.Part.from_text(
-                    f"This is a rice leaf image. My model predicted '{model_prediction}' "
-                    f"with {confidence:.1f}% confidence but I'm not sure. "
-                    f"The possible diseases are: {class_list}. "
-                    f"What disease does this rice leaf most likely have? "
-                    f"Answer with ONLY the exact class name from the list, nothing else."
+                    text=(
+                        f"This is a rice leaf image. My model predicted '{model_prediction}' "
+                        f"with {confidence:.1f}% confidence but I'm not sure. "
+                        f"The possible diseases are: {class_list}. "
+                        f"What disease does this rice leaf most likely have? "
+                        f"Answer with ONLY the exact class name from the list, nothing else."
+                    )
                 )
             ]
         )
