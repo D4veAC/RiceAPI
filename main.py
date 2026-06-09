@@ -1,5 +1,8 @@
 import json
 import os
+import asyncio
+from contextlib import asynccontextmanager
+from functools import partial
 import numpy as np
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,20 +13,11 @@ from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 from google import genai
 from google.genai import types
 
-app = FastAPI(title="Rice Disease Classifier", version="3.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 model = None
 class_names = []
 gemini_client = None
 
-@app.on_event("startup")
+
 def load_model():
     global model, class_names, gemini_client
 
@@ -56,6 +50,24 @@ def load_model():
         print("Gemini 2.5 Flash loaded.")
     else:
         print("WARNING: GEMINI_API_KEY not set. Running without Gemini validation.")
+
+
+# Use lifespan context manager instead of deprecated @app.on_event("startup")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    load_model()
+    yield
+    # Shutdown cleanup (if needed in the future)
+
+
+app = FastAPI(title="Rice Disease Classifier", version="3.0.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/")
@@ -132,8 +144,9 @@ async def predict(file: UploadFile = File(...)):
     if model is None or not class_names:
         raise HTTPException(status_code=503, detail="Model belum siap, coba lagi.")
     
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File harus berupa gambar")
+    content_type = file.content_type or ""
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File harus berupa gambar (image/*)")
 
     image_bytes = await file.read()
 
@@ -146,7 +159,10 @@ async def predict(file: UploadFile = File(...)):
 
     # Step 2: Model predict
     img_array = preprocess_image(image_bytes)
-    preds = model.predict(img_array)[0]
+    # Run CPU-intensive prediction in a thread to avoid blocking the async event loop
+    loop = asyncio.get_event_loop()
+    preds = await loop.run_in_executor(None, partial(model.predict, img_array))
+    preds = preds[0]
     top_idx = int(np.argmax(preds))
     top_conf = float(preds[top_idx])
 
