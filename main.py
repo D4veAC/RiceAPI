@@ -84,48 +84,47 @@ def resize_for_gemini(image_bytes: bytes) -> bytes:
     return buf.getvalue()
 
 
-def validate_with_gemini(image_bytes: bytes) -> tuple[bool, str]:
+def analyze_with_gemini(image_bytes: bytes) -> dict | None:
+    prompt = """
+        Analyze this image of a paddy plant. 
+        Identify if it has one of these 6 conditions: 
+        1. Blast
+        2. HDB (Bacterial Leaf Blight)
+        3. Tungro
+        4. Brown Planthopper (Wereng Cokelat)
+        5. Golden Apple Snail (Keong Mas)
+        6. Nitrogen Deficiency
+        
+        Or if it looks Healthy.
+        
+        Return a JSON object with:
+        - condition: string (one of the above or "Healthy" or "Unknown")
+        - confidence: number (0-100)
+        - treatment: string (specific advice in Indonesian)
+        - description: string (brief description of what is seen)
+    """
     try:
         img_bytes = resize_for_gemini(image_bytes)
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
+                types.Part.from_text(text=prompt),
                 types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
-                types.Part.from_text(text="Is this a close-up photo of a rice plant leaf? Answer with ONLY 'yes' or 'no', nothing else.")
-            ]
+            ],
+            config={"responseMimeType": "application/json"}
         )
-        answer = response.text.strip().lower()
-        return ("yes" in answer), answer
+        response_text = response.text
+        if not response_text:
+            raise ValueError("Empty Gemini response")
+        result = json.loads(response_text)
+        if not isinstance(result, dict):
+            raise ValueError("Gemini returned non-JSON object")
+        return result
     except Exception as e:
-        print(f"Gemini error: {e}")
-        return True, "gemini_error"
+        print(f"Gemini analysis error: {e}")
+        return None
 
 
-def recheck_with_gemini(image_bytes: bytes, model_prediction: str, confidence: float) -> dict:
-    try:
-        img_bytes = resize_for_gemini(image_bytes)
-        class_list = ", ".join(class_names)
-        response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
-                types.Part.from_text(
-                    text=(
-                        f"This is a rice leaf image. My model predicted '{model_prediction}' "
-                        f"with {confidence:.1f}% confidence but I'm not sure. "
-                        f"The possible diseases are: {class_list}. "
-                        f"What disease does this rice leaf most likely have? "
-                        f"Answer with ONLY the exact class name from the list, nothing else."
-                    )
-                )
-            ]
-        )
-        gemini_answer = response.text.strip()
-        matched = next((c for c in class_names if c.lower() in gemini_answer.lower()), None)
-        return {"gemini_says": gemini_answer, "matched_class": matched}
-    except Exception as e:
-        print(f"Gemini recheck error: {e}")
-        return {"gemini_says": None, "matched_class": None}
 
 
 @app.post("/predict")
@@ -138,17 +137,12 @@ async def predict(file: UploadFile = File(...)):
 
     image_bytes = await file.read()
 
-    # Step 1: Gemini gatekeeper
     if gemini_client is not None:
-        is_leaf, gemini_raw = validate_with_gemini(image_bytes)
-        if not is_leaf:
-            return {
-                "prediction": "Not a rice leaf",
-                "confidence": 0.0,
-                "all_scores": [],
-                "message": "Gambar tidak dikenali sebagai daun padi. Pastikan foto menampilkan daun padi secara jelas.",
-                "validated_by": "gemini"
-            }
+        gemini_result = analyze_with_gemini(image_bytes)
+        if gemini_result is not None:
+            gemini_result["source"] = "gemini"
+            return gemini_result
+        print("Gemini analysis failed or returned invalid output, falling back to RiceAPI model.")
 
     # Step 2: Model predict
     img_array = preprocess_image(image_bytes)
@@ -173,15 +167,8 @@ async def predict(file: UploadFile = File(...)):
             "validated_by": "threshold"
         }
 
-    # Step 4: Gemini recheck kalau confidence 0.5-0.75
     final_prediction = class_names[top_idx]
-    validated_by = "model"
-
-    if gemini_client is not None and top_conf < 0.75:
-        recheck = recheck_with_gemini(image_bytes, final_prediction, top_conf * 100)
-        if recheck["matched_class"]:
-            final_prediction = recheck["matched_class"]
-            validated_by = "gemini_recheck"
+    validated_by = "riceapi"
 
     return {
         "prediction": final_prediction,
